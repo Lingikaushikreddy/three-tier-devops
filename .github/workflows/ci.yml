@@ -66,11 +66,21 @@ jobs:
       - name: Failure drill (chaos test)
         run: ./scripts/chaos.sh
 
-      - name: Show fired alerts for the record
+      - name: Show alert rule states for the record
         if: always()
+        # A heredoc keeps the python out of the shell's quoting rules entirely.
+        # The previous inline version had \" inside a single-quoted string,
+        # which bash passes through literally and python rejects.
         run: |
-          curl -fsS http://127.0.0.1:9090/api/v1/rules \
-            | python3 -c 'import json,sys; [print(f"{r[\"name\"]:<24} {r.get(\"state\",\"?\")}") for g in json.load(sys.stdin)["data"]["groups"] for r in g["rules"]]'
+          curl -fsS http://127.0.0.1:9090/api/v1/rules -o /tmp/rules.json || exit 0
+          python3 - <<'PY'
+          import json
+          with open("/tmp/rules.json") as fh:
+              data = json.load(fh)
+          for group in data["data"]["groups"]:
+              for rule in group["rules"]:
+                  print(f'{rule["name"]:<24} {rule.get("state", "?")}')
+          PY
 
       - name: Dump logs if anything failed
         if: failure()

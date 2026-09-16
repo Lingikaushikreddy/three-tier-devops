@@ -150,12 +150,32 @@ check "no alerts are firing on a healthy stack" "0" "$FIRING"
 
 # Prometheus must have actually INGESTED our app metrics, not merely reached
 # the target. A 200 from /metrics proves nothing about what is in the database.
-HAS_METRIC=$(curl -fsS "$PROM/api/v1/query?query=http_requests_total" \
-  | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["data"]["result"]) > 0)')
+#
+# Prometheus is EVENTUALLY consistent: it pulls every scrape_interval (15s), so
+# a series can be absent simply because the next scrape has not happened yet.
+# Querying it immediately after startup is a race, not a failure. Wait for it.
+query_has_result() {
+  curl -fsS "$PROM/api/v1/query?query=$1" 2>/dev/null \
+    | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["data"]["result"]) > 0)' 2>/dev/null
+}
+
+HAS_METRIC=False
+for _ in $(seq 1 30); do
+  # generate traffic so there is definitely something to scrape
+  curl -fsS "$BASE/health" >/dev/null 2>&1 || true
+  HAS_METRIC=$(query_has_result "http_requests_total")
+  [ "$HAS_METRIC" = "True" ] && break
+  sleep 2
+done
 check "app metrics reached prometheus" "True" "$HAS_METRIC"
 
-DB_GAUGE=$(curl -fsS "$PROM/api/v1/query?query=database_up" \
-  | python3 -c 'import json,sys; r=json.load(sys.stdin)["data"]["result"]; print(r[0]["value"][1] if r else "missing")')
+DB_GAUGE=missing
+for _ in $(seq 1 30); do
+  DB_GAUGE=$(curl -fsS "$PROM/api/v1/query?query=database_up" 2>/dev/null \
+    | python3 -c 'import json,sys; r=json.load(sys.stdin)["data"]["result"]; print(r[0]["value"][1] if r else "missing")' 2>/dev/null)
+  [ "$DB_GAUGE" = "1" ] && break
+  sleep 2
+done
 check "database_up reports 1" "1" "$DB_GAUGE"
 
 echo "--- observability: grafana ---"
