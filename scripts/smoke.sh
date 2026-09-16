@@ -101,6 +101,25 @@ else
   PASS=$((PASS + 1))
 fi
 
+echo "--- container health ---"
+# Nothing used to assert this, so the nginx healthcheck was quietly failing for
+# days while the site worked fine. An unhealthy container is a broken probe or
+# a broken service; either way you want to know.
+UNHEALTHY=$(docker compose ps --format json 2>/dev/null \
+  | python3 -c '
+import json, sys
+bad = []
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    row = json.loads(line)
+    if "unhealthy" in row.get("Status", "").lower():
+        bad.append(row.get("Name", "?"))
+print(",".join(bad))
+')
+check "no container reports unhealthy" "" "$UNHEALTHY"
+
 echo "--- observability: prometheus ---"
 
 # Wait for the monitoring tier the same way we waited for the app. Prometheus

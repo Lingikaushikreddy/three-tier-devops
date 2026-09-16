@@ -79,7 +79,7 @@ Then open:
 And run the tests:
 
 ```bash
-./scripts/smoke.sh       # 34 checks, end to end
+./scripts/smoke.sh       # 35 checks, end to end
 ./scripts/chaos.sh       # 12 checks: kill the DB, prove the alert fires
 ```
 
@@ -182,7 +182,7 @@ nothing happen? You need `down -v`.
 
 ### 6. Unit tests and integration tests answer different questions
 
-| | `api/tests/` (15 tests) | `scripts/smoke.sh` (34 checks) |
+| | `api/tests/` (15 tests) | `scripts/smoke.sh` (35 checks) |
 |---|---|---|
 | Speed | milliseconds | ~30 seconds |
 | Needs containers | no | the whole stack |
@@ -295,7 +295,7 @@ push / PR
    └─ Job 2: integration  ◄── needs: unit
         docker compose config --quiet    (is the YAML even valid?)
         docker compose up -d --build     (build all seven containers)
-        ./scripts/smoke.sh               (34 end-to-end checks)
+        ./scripts/smoke.sh               (35 end-to-end checks)
         ./scripts/chaos.sh               (12 checks: kill the DB, alert must fire)
         docker compose logs   ← only `if: failure()`
         docker compose down -v ← `if: always()`, so nothing leaks between runs
@@ -330,6 +330,29 @@ itself*, and *always find out which process owns a port before drawing conclusio
 
 ---
 
+## A second bug, found by accident
+
+`docker compose ps` showed `tt-web` as **unhealthy** while the website worked perfectly.
+
+```bash
+# from the host
+curl http://localhost:8080/nginx-health     # 200 OK
+
+# from inside the container, which is what the healthcheck does
+wget -qO- http://localhost/nginx-health     # Connection refused
+```
+
+`listen 80;` binds IPv4 only (`0.0.0.0:80`), but inside the container `localhost`
+resolves to **both** `127.0.0.1` and `::1`, and wget tries IPv6 first. The probe was
+broken, not the server. Fixed by using `127.0.0.1` explicitly in every healthcheck.
+
+The deeper problem was that **nothing asserted container health**, so a permanently
+failing probe went unnoticed. `smoke.sh` now fails if any container reports unhealthy —
+because a broken health probe is just as dangerous as a broken service: it's the thing
+your orchestrator uses to decide whether to restart or route traffic.
+
+---
+
 ## Layout
 
 ```
@@ -353,7 +376,7 @@ three-tier-devops/
 │       ├── provisioning/     # datasource + dashboard loader (as code)
 │       └── dashboards/       # 12-panel dashboard JSON
 ├── scripts/
-│   ├── smoke.sh              # 34-check integration test
+│   ├── smoke.sh              # 35-check integration test
 │   └── chaos.sh              # 12-check failure drill
 ├── Makefile                  # make up / smoke / logs / psql / clean
 └── .github/workflows/ci.yml  # unit → integration

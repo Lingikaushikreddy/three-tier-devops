@@ -70,7 +70,10 @@ services:
       api:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost/nginx-health"]
+      # 127.0.0.1, NOT localhost: nginx listens on IPv4 only, but inside the
+      # container "localhost" also resolves to ::1 and wget tries IPv6 first,
+      # so the check failed while the site was perfectly fine.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/nginx-health"]
       interval: 10s
       timeout: 3s
       retries: 3
@@ -96,7 +99,7 @@ services:
     ports:
       - "${PROMETHEUS_PORT:-9090}:9090"
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9090/-/healthy"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -123,7 +126,7 @@ services:
       prometheus:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health | grep -q ok"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health | grep -q ok"]
       interval: 10s
       timeout: 5s
       retries: 10
