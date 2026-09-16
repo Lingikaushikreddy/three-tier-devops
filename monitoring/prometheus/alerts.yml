@@ -1,0 +1,71 @@
+# Alert rules. `for:` is the most important field on this page — it is how you
+# avoid being woken at 3am by a two-second blip that already fixed itself.
+
+groups:
+  - name: availability
+    rules:
+      - alert: ApiDown
+        expr: up{job="api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The API is not being scraped"
+          description: "Prometheus cannot reach api:8000/metrics — the app is down or unreachable."
+
+      - alert: DatabaseDown
+        expr: database_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The API cannot reach PostgreSQL"
+          description: "The app is running but its database health query is failing."
+
+      - alert: PostgresExporterDown
+        expr: up{job="postgres"} == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Database metrics are missing"
+          description: "postgres-exporter is not responding, so we are blind to database health."
+
+  - name: performance
+    rules:
+      # Errors as a FRACTION of traffic, never a raw count. 50 errors out of
+      # 50,000 requests is fine; 50 out of 60 is an outage.
+      - alert: HighErrorRate
+        expr: |
+          sum(rate(http_requests_total{status=~"5.."}[5m]))
+            /
+          sum(rate(http_requests_total[5m]))
+            > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "More than 5% of requests are failing"
+          description: "5xx responses exceeded 5% of all traffic for five minutes."
+
+      - alert: HighLatencyP95
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum(rate(http_request_duration_seconds_bucket[5m])) by (le)
+          ) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "95th percentile latency is above 500ms"
+          description: "The slowest 5% of requests are taking longer than half a second."
+
+      - alert: NoTrafficAtAll
+        expr: sum(rate(http_requests_total[10m])) == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The API is serving no traffic"
+          description: "Healthy but completely idle — often means the tier in front of it is broken."

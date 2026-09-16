@@ -2,11 +2,13 @@
 
 import os
 
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request
 
-from db import fetch_all, fetch_one, ping
+from db import fetch_all, fetch_all_bounded, fetch_one, ping
+from metrics import DB_UP, TASKS, render_latest, track
 
 app = Flask(__name__)
+track(app)  # time and count every request
 
 APP_VERSION = os.environ.get("APP_VERSION", "1.0.0")
 
@@ -38,12 +40,39 @@ def health():
     A health check that only says "the web server is up" is close to useless.
     """
     db_ok = ping()
+    DB_UP.set(1 if db_ok else 0)
     status_code = 200 if db_ok else 503
     return jsonify(
         status="healthy" if db_ok else "degraded",
         version=APP_VERSION,
         database="connected" if db_ok else "unreachable",
     ), status_code
+
+
+@app.get("/metrics")
+def metrics():
+    """Prometheus scrapes this. Deliberately NOT exposed through nginx.
+
+    /metrics leaks internal route names, latency and traffic volume. It belongs
+    on the private network, reachable by Prometheus only.
+    """
+    _refresh_business_metrics()
+    payload, content_type = render_latest()
+    return Response(payload, mimetype=content_type)
+
+
+def _refresh_business_metrics():
+    """Read the real numbers out of the database at scrape time."""
+    try:
+        rows = fetch_all_bounded("SELECT done, COUNT(*) FROM tasks GROUP BY done")
+        counts = {bool(done): count for done, count in rows}
+        TASKS.labels(state="done").set(counts.get(True, 0))
+        TASKS.labels(state="pending").set(counts.get(False, 0))
+        DB_UP.set(1)
+    except Exception:
+        # A scrape must never fail just because the database is down — that
+        # would hide the very outage you are trying to observe.
+        DB_UP.set(0)
 
 
 @app.get("/api/tasks")

@@ -1,0 +1,41 @@
+# Prometheus PULLS metrics. Nothing pushes to it.
+# Each target just publishes a /metrics page; Prometheus fetches them on a timer.
+
+global:
+  scrape_interval: 15s # how often to pull
+  evaluation_interval: 15s # how often to test the alert rules
+  external_labels:
+    stack: three-tier-devops
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  # Prometheus scraping itself — always keep this, it's how you notice
+  # that your monitoring is the thing that broke.
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Our Flask application. Hostname "api" comes from Docker's DNS.
+  - job_name: api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api:8000"]
+        labels:
+          tier: application
+
+  # Postgres, translated into metrics by a sidecar exporter. The database
+  # itself speaks SQL, not Prometheus — an exporter bridges the two.
+  - job_name: postgres
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
+        labels:
+          tier: data
+
+  # Per-container CPU, memory, network and disk for everything on this host.
+  - job_name: cadvisor
+    static_configs:
+      - targets: ["cadvisor:8080"]
+        labels:
+          tier: infrastructure

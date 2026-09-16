@@ -52,8 +52,9 @@ services:
       timeout: 5s
       retries: 5
       start_period: 15s
-    networks: [backend, frontend]
-    # Also no published port. nginx reaches it over the `frontend` network.
+    networks: [backend, frontend, monitoring]
+    # Still no published port. nginx reaches it over `frontend`,
+    # Prometheus scrapes it over `monitoring`.
 
   # ---------- Tier 1: web / reverse proxy ----------
   web:
@@ -75,11 +76,99 @@ services:
       retries: 3
     networks: [frontend]
 
+  # ---------- Observability ----------
+  # These four are the monitoring stack. Note none of them can reach the
+  # database except postgres-exporter, which is the only one that needs to.
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: tt-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle # lets you reload config without a restart
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - promdata:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [monitoring]
+
+  grafana:
+    image: grafana/grafana:11.5.1
+    container_name: tt-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      # Off by default. Turning it on would let Grafana phone home.
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      # Datasource and dashboards arrive as FILES, not as clicks in the UI.
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health | grep -q ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks: [monitoring]
+
+  # Postgres speaks SQL, not Prometheus. This sidecar translates.
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.16.0
+    container_name: tt-postgres-exporter
+    restart: unless-stopped
+    environment:
+      DATA_SOURCE_NAME: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-tasks}?sslmode=disable
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [backend, monitoring]
+
+  # Per-container CPU / memory / network, straight from the Docker engine.
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: tt-cadvisor
+    restart: unless-stopped
+    privileged: true
+    command:
+      - --housekeeping_interval=10s
+      - --docker_only=true
+    volumes:
+      # Read-only windows into the host so cAdvisor can see the containers.
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    networks: [monitoring]
+
 networks:
   # Two networks so the web tier physically cannot reach the database.
   # Network segmentation, the same idea as a DMZ.
   frontend:
   backend:
+  # Metrics traffic gets its own network too.
+  monitoring:
 
 volumes:
   pgdata:
+  promdata:
+  grafanadata:

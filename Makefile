@@ -1,9 +1,9 @@
 # One-word commands so you don't memorise long docker lines.
-.PHONY: up down logs ps smoke test lint build clean psql reset
+.PHONY: up down logs ps smoke chaos test lint build clean psql reset urls
 
 up:        ## build and start the whole stack
 	docker compose up -d --build
-	@echo "-> http://localhost:$${WEB_PORT:-8080}"
+	@$(MAKE) --no-print-directory urls
 
 down:      ## stop the stack (keeps the database data)
 	docker compose down
@@ -19,6 +19,16 @@ ps:        ## show container status and health
 
 smoke:     ## run the integration test against the running stack
 	./scripts/smoke.sh
+
+chaos:     ## break the database on purpose and prove the alert fires
+	./scripts/chaos.sh
+
+urls:      ## print every UI this stack exposes
+	@echo "  app         http://localhost:$${WEB_PORT:-8080}"
+	@echo "  prometheus  http://localhost:$${PROMETHEUS_PORT:-9090}"
+	@echo "  targets     http://localhost:$${PROMETHEUS_PORT:-9090}/targets"
+	@echo "  alerts      http://localhost:$${PROMETHEUS_PORT:-9090}/alerts"
+	@echo "  grafana     http://localhost:$${GRAFANA_PORT:-3000}  (admin/admin)"
 
 test:      ## run the api unit tests locally
 	cd api && python3 -m venv .venv && ./.venv/bin/pip install -q -r requirements-dev.txt && ./.venv/bin/pytest -v

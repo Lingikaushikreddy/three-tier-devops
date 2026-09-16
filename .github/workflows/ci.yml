@@ -35,9 +35,10 @@ jobs:
 
   # ---------- Slow feedback: the real three-tier stack ----------
   integration:
-    name: Integration (full stack)
+    name: Integration (full stack + monitoring)
     runs-on: ubuntu-latest
     needs: unit
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v4
@@ -58,6 +59,18 @@ jobs:
 
       - name: Run the integration smoke test
         run: ./scripts/smoke.sh
+
+      # Break the database on purpose and assert the system degrades honestly,
+      # keeps publishing metrics, and fires the alert. Monitoring you have
+      # never watched fire is only a guess that it works.
+      - name: Failure drill (chaos test)
+        run: ./scripts/chaos.sh
+
+      - name: Show fired alerts for the record
+        if: always()
+        run: |
+          curl -fsS http://127.0.0.1:9090/api/v1/rules \
+            | python3 -c 'import json,sys; [print(f"{r[\"name\"]:<24} {r.get(\"state\",\"?\")}") for g in json.load(sys.stdin)["data"]["groups"] for r in g["rules"]]'
 
       - name: Dump logs if anything failed
         if: failure()

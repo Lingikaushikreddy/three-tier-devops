@@ -2,9 +2,10 @@
 
 [![CI](https://github.com/Lingikaushikreddy/three-tier-devops/actions/workflows/ci.yml/badge.svg)](https://github.com/Lingikaushikreddy/three-tier-devops/actions/workflows/ci.yml)
 
-**nginx → Flask API → PostgreSQL**, three containers, one command, with health checks,
-network segmentation, persistent storage and a CI pipeline that stands the whole stack
-up and tests it end to end.
+**nginx → Flask API → PostgreSQL**, plus **Prometheus + Grafana** monitoring — seven
+containers, one command. Health checks, network segmentation, persistent storage,
+provisioned dashboards, alert rules, and a CI pipeline that stands the whole thing up,
+tests it end to end, then **breaks the database on purpose to prove the alerts fire.**
 
 ---
 
@@ -12,26 +13,45 @@ up and tests it end to end.
 
 ```
                     your laptop / the internet
-                              │
-                              │  only this port is open
-                              ▼
-                    ┌───────────────────┐
-                    │  web  ·  nginx    │   :8080 → :80
-                    │  static + proxy   │
-                    └─────────┬─────────┘
-                              │  frontend network
-                              ▼
-                    ┌───────────────────┐
-                    │  api  ·  Flask    │   :8000, NOT published
-                    │  gunicorn, 2 wkrs │
-                    └─────────┬─────────┘
-                              │  backend network
-                              ▼
-                    ┌───────────────────┐
-                    │  db  · PostgreSQL │   :5432, NOT published
-                    │  named volume     │
-                    └───────────────────┘
+                       │            │           │
+                    :8080        :9090       :3000
+                       ▼            │           │
+             ┌───────────────────┐  │           │
+             │  web  ·  nginx    │  │           │
+             └─────────┬─────────┘  │           │
+                       │ frontend   │           │
+                       ▼            │           │
+             ┌───────────────────┐  │           │
+             │  api  ·  Flask    │◄─┤ scraped   │
+             │  /metrics         │  │           │
+             └─────────┬─────────┘  │           │
+                       │ backend    │           │
+                       ▼            │           │
+             ┌───────────────────┐  │           │
+             │  db  · PostgreSQL │  │           │
+             └─────────┬─────────┘  │           │
+                       │            │           │
+             ┌─────────▼─────────┐  │           │
+             │ postgres-exporter │◄─┤           │
+             └───────────────────┘  │           │
+             ┌───────────────────┐  │           │
+             │ cadvisor          │◄─┘           │
+             └───────────────────┘              │
+             ┌───────────────────┐              │
+             │ prometheus        │◄─────────────┘
+             │ 15d retention     │   queried by grafana
+             └───────────────────┘
 ```
+
+| Service | Port | Purpose |
+|---|---|---|
+| `web` | **8080** | nginx: static page + reverse proxy |
+| `api` | internal | Flask + gunicorn, exposes `/metrics` |
+| `db` | internal | PostgreSQL |
+| `prometheus` | **9090** | scrapes, stores, evaluates alert rules |
+| `grafana` | **3000** | dashboards (`admin`/`admin`) |
+| `postgres-exporter` | internal | turns Postgres stats into metrics |
+| `cadvisor` | internal | per-container CPU/memory |
 
 **Two separate networks is the whole security idea.** `web` sits only on `frontend`,
 `db` sits only on `backend`, and `api` is the single thing on both. nginx cannot even
@@ -47,10 +67,20 @@ docker compose up -d --build
 open http://localhost:8080
 ```
 
-Then run the integration test:
+Then open:
+
+| | |
+|---|---|
+| App | http://localhost:8080 |
+| Prometheus targets | http://localhost:9090/targets |
+| Prometheus alerts | http://localhost:9090/alerts |
+| Grafana dashboard | http://localhost:3000 → *Three-Tier Stack → Overview* |
+
+And run the tests:
 
 ```bash
-./scripts/smoke.sh       # 19 checks, end to end
+./scripts/smoke.sh       # 34 checks, end to end
+./scripts/chaos.sh       # 12 checks: kill the DB, prove the alert fires
 ```
 
 Shut down:
@@ -152,7 +182,7 @@ nothing happen? You need `down -v`.
 
 ### 6. Unit tests and integration tests answer different questions
 
-| | `api/tests/` (9 tests) | `scripts/smoke.sh` (19 checks) |
+| | `api/tests/` (15 tests) | `scripts/smoke.sh` (34 checks) |
 |---|---|---|
 | Speed | milliseconds | ~30 seconds |
 | Needs containers | no | the whole stack |
@@ -163,6 +193,96 @@ CI runs the fast one first and only builds the stack if it passes.
 
 ---
 
+## Monitoring: the four lessons
+
+### 1. Instrument the RED metrics, then one business metric
+
+**R**ate, **E**rrors, **D**uration — almost every service dashboard worth having is built
+from those three. This app exports:
+
+| Metric | Type | Why |
+|---|---|---|
+| `http_requests_total{method,endpoint,status}` | counter | rate and errors |
+| `http_request_duration_seconds` | histogram | latency percentiles |
+| `tasks_total{state}` | gauge | **the business metric** |
+| `database_up` | gauge | dependency health |
+
+`tasks_total` is the one people forget. CPU graphs tell you the *server* is alive;
+`tasks_total` tells you the *product* works. Plenty of outages look perfectly healthy on
+infrastructure dashboards.
+
+### 2. Never put an unbounded value in a label
+
+```python
+endpoint = request.url_rule.rule      # "/api/tasks/<int:task_id>"   ✅
+endpoint = request.path               # "/api/tasks/7"               ❌
+```
+
+Every distinct label value is a separate time series stored forever. Use the raw path and
+a bot scanning your 404s can create millions of series and take Prometheus down. There's
+a unit test (`test_route_ids_are_normalised_into_one_series`) and a smoke check enforcing
+this.
+
+### 3. gunicorn has 2 workers, and that quietly breaks counters
+
+Each worker is its own process with its own copy of every counter. Prometheus scrapes
+once and gets whichever worker answered:
+
+```
+scrape 1 → worker A → 40 requests
+scrape 2 → worker B → 37 requests     ← the counter appears to go DOWN
+```
+
+Counters must never decrease, so Prometheus reads that as a restart and your `rate()`
+graphs turn to noise. The fix is `prometheus_client`'s multiprocess mode: workers write
+to shared files in `PROMETHEUS_MULTIPROC_DIR` and `/metrics` sums them. It needs **three**
+things, and missing any one breaks it silently:
+
+1. `PROMETHEUS_MULTIPROC_DIR` set, and the directory writable by the app user
+2. `multiprocess.MultiProcessCollector(registry)` in the `/metrics` handler
+3. `child_exit` in `gunicorn.conf.py` calling `mark_process_dead(worker.pid)` — without
+   it, a crashed worker's numbers haunt your totals forever
+
+`Gauge` additionally needs a `multiprocess_mode` (we use `mostrecent`), because "combine
+4 workers' values into one" has no single right answer.
+
+### 4. Dashboards and datasources belong in git, not in the UI
+
+Everything under `monitoring/grafana/provisioning/` is applied at startup. You *could*
+click all of it into Grafana's UI — and then it would exist only in Grafana's database,
+be unreproducible, and disappear the moment the container is recreated. Delete the
+`grafanadata` volume and run `make up`: the dashboard is still there.
+
+---
+
+## The bug this project actually taught me
+
+The chaos drill exists because of a real failure found while building it.
+
+**Symptom:** stopped the database, expected `DatabaseDown` to fire. It went `pending`,
+then vanished — and `ApiDown` fired instead.
+
+**Cause:** `/metrics` queried the database on every scrape to refresh `tasks_total`, with
+no timeout. With the database gone, the connection pool blocked for 40+ seconds.
+Prometheus gives up at 10s, marked the API target **down**, and therefore recorded *no*
+`database_up` value at all — so the alert about the database could never fire.
+
+```
+  before:  /metrics → 40s hang → target DOWN → all API metrics lost
+  after :  /metrics → 0.01s    → target UP   → database_up=0 → alert fires
+```
+
+**Fix:** a bounded query timeout (`fetch_all_bounded`, 2s) plus `connect_timeout=3` in
+the connection string. Stale business numbers beat no telemetry.
+
+**The general rule: a metrics endpoint must never block on a dependency.** If your
+monitoring shares a failure mode with the thing it monitors, it will go blind exactly
+when you need it. `scripts/chaos.sh` now asserts `/metrics` answers in under 5 seconds
+with the database dead, so this can't regress.
+
+
+---
+
 ## The CI pipeline
 
 ```
@@ -170,12 +290,13 @@ push / PR
    │
    ├─ Job 1: unit ──────────────────────────────┐
    │    ruff check .                             │
-   │    pytest -v              (9 tests)         │
+   │    pytest -v              (15 tests)        │
    │                                             │
    └─ Job 2: integration  ◄── needs: unit
         docker compose config --quiet    (is the YAML even valid?)
-        docker compose up -d --build     (build all three tiers)
-        ./scripts/smoke.sh               (19 end-to-end checks)
+        docker compose up -d --build     (build all seven containers)
+        ./scripts/smoke.sh               (34 end-to-end checks)
+        ./scripts/chaos.sh               (12 checks: kill the DB, alert must fire)
         docker compose logs   ← only `if: failure()`
         docker compose down -v ← `if: always()`, so nothing leaks between runs
 ```
@@ -224,7 +345,16 @@ three-tier-devops/
 │   ├── nginx.conf            # reverse proxy + forwarded headers
 │   └── index.html            # small status page
 ├── db/init.sql               # schema + indexes + seed data
-├── scripts/smoke.sh          # 19-check integration test
+├── monitoring/
+│   ├── prometheus/
+│   │   ├── prometheus.yml    # scrape targets
+│   │   └── alerts.yml        # 6 alert rules
+│   └── grafana/
+│       ├── provisioning/     # datasource + dashboard loader (as code)
+│       └── dashboards/       # 12-panel dashboard JSON
+├── scripts/
+│   ├── smoke.sh              # 34-check integration test
+│   └── chaos.sh              # 12-check failure drill
 ├── Makefile                  # make up / smoke / logs / psql / clean
 └── .github/workflows/ci.yml  # unit → integration
 ```
@@ -238,6 +368,8 @@ make up        # build + start everything
 make ps        # status and health of each tier
 make logs      # follow all three tiers at once
 make smoke     # run the integration test
+make chaos     # kill the database, prove the alert fires
+make urls      # print every UI this stack exposes
 make psql      # database shell (the only way in)
 make down      # stop, keep data
 make reset     # stop, wipe data
@@ -250,6 +382,6 @@ make reset     # stop, wipe data
 - Stop just the database (`docker compose stop db`) and watch `/health` return **503**
   while `/nginx-health` stays **200**. That's why you separate them.
 - Scale the API: `docker compose up -d --scale api=3`. nginx load-balances automatically.
-- Add Prometheus + Grafana as a fourth and fifth service.
+- Add Alertmanager so `DatabaseDown` sends email or Slack instead of only showing in the UI.
 - Move this to Kubernetes: each service becomes a Deployment + Service, `.env` becomes a
   ConfigMap and a Secret, and the healthchecks become liveness/readiness probes.
