@@ -1,0 +1,19 @@
+# Provisioning = configuration as code.
+#
+# You COULD click through Grafana's UI to add this datasource. Then it would
+# live only in Grafana's database, nobody else could reproduce it, and it would
+# vanish the moment the container is recreated. This file is version-controlled
+# and applied automatically at startup instead.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus # dashboards reference this id, so keep it stable
+    access: proxy # Grafana's SERVER queries Prometheus, not your browser
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s # match Prometheus's scrape_interval

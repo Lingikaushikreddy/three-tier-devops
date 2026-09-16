@@ -35,9 +35,10 @@ jobs:
 
   # ---------- Slow feedback: the real three-tier stack ----------
   integration:
-    name: Integration (full stack)
+    name: Integration (full stack + monitoring)
     runs-on: ubuntu-latest
     needs: unit
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v4
@@ -58,6 +59,28 @@ jobs:
 
       - name: Run the integration smoke test
         run: ./scripts/smoke.sh
+
+      # Break the database on purpose and assert the system degrades honestly,
+      # keeps publishing metrics, and fires the alert. Monitoring you have
+      # never watched fire is only a guess that it works.
+      - name: Failure drill (chaos test)
+        run: ./scripts/chaos.sh
+
+      - name: Show alert rule states for the record
+        if: always()
+        # A heredoc keeps the python out of the shell's quoting rules entirely.
+        # The previous inline version had \" inside a single-quoted string,
+        # which bash passes through literally and python rejects.
+        run: |
+          curl -fsS http://127.0.0.1:9090/api/v1/rules -o /tmp/rules.json || exit 0
+          python3 - <<'PY'
+          import json
+          with open("/tmp/rules.json") as fh:
+              data = json.load(fh)
+          for group in data["data"]["groups"]:
+              for rule in group["rules"]:
+                  print(f'{rule["name"]:<24} {rule.get("state", "?")}')
+          PY
 
       - name: Dump logs if anything failed
         if: failure()
