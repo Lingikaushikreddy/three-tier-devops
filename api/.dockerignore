@@ -1,0 +1,8 @@
+tests
+requirements-dev.txt
+pyproject.toml
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.env

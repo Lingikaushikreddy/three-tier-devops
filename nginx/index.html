@@ -1,0 +1,42 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Three-Tier DevOps Demo</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, system-ui, sans-serif; max-width: 640px;
+         margin: 3rem auto; padding: 0 1.5rem; line-height: 1.6; }
+  h1 { margin-bottom: .25rem; }
+  .sub { color: #777; margin-top: 0; }
+  .tier { border: 1px solid #8884; border-radius: 8px; padding: .75rem 1rem; margin: .5rem 0; }
+  code { background: #8882; padding: .15rem .4rem; border-radius: 4px; }
+  #status { font-weight: 600; }
+  ul { padding-left: 1.2rem; }
+</style>
+
+<h1>Three-Tier DevOps Demo</h1>
+<p class="sub">nginx &rarr; Flask API &rarr; PostgreSQL, all in containers.</p>
+
+<div class="tier"><strong>Tier 1 &mdash; web</strong><br>nginx: serves this page, proxies <code>/api/*</code></div>
+<div class="tier"><strong>Tier 2 &mdash; app</strong><br>Flask + gunicorn, not reachable from outside</div>
+<div class="tier"><strong>Tier 3 &mdash; data</strong><br>PostgreSQL, no published port at all</div>
+
+<p>Stack health: <span id="status">checking&hellip;</span></p>
+
+<h3>Try it</h3>
+<ul>
+  <li><a href="/health">/health</a> &mdash; app + database status</li>
+  <li><a href="/api/tasks">/api/tasks</a> &mdash; list tasks</li>
+  <li><a href="/nginx-health">/nginx-health</a> &mdash; proxy only</li>
+</ul>
+
+<script>
+  fetch('/health')
+    .then(r => r.json())
+    .then(d => {
+      document.getElementById('status').textContent =
+        d.status + ' — database ' + d.database;
+    })
+    .catch(() => {
+      document.getElementById('status').textContent = 'API unreachable';
+    });
+</script>
