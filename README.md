@@ -9,6 +9,12 @@ tests it end to end, then **breaks the database on purpose to prove the alerts f
 
 ---
 
+> 📖 **New to any of this?** [`docs/WHY.md`](docs/WHY.md) explains every decision in this
+> repo from scratch — why three tiers, why two networks, why `condition: service_healthy`,
+> why Prometheus pulls instead of receives — with the four real bugs found while building it.
+
+---
+
 ## The architecture
 
 ```
